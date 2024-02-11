@@ -32,6 +32,7 @@ export default function IdentityPage() {
         justify: "",
         close: false,
         sign: true,
+        edit: false,
     });
     const onChangeHandler = (e) => {
         let value = e.target.value;
@@ -56,38 +57,87 @@ export default function IdentityPage() {
         for (const [key, value] of Object.entries(userData)) {
             form_data.append(key, value);
         }
-        await fetch("http://localhost:8000/identity/create", {
-            method: "POST",
-            body: form_data,
-            mode: "cors",
-        })
+        if (!content.edit) {
+            await fetch("http://localhost:8000/identity/create", {
+                method: "POST",
+                body: form_data,
+                mode: "cors",
+            })
             .then((response) => {
                 console.log(response);
                 handleRefresh();
             })
             .catch((err) => console.log(err));
+        } else {
+            const differing_attributes = Object.keys(userData).filter((key) => userData[key] !== identity[key]);
+            if (differing_attributes.length > 0) {
+                await fetch("http://localhost:8000/identity/change", {
+                    method: "POST",
+                    body: form_data,
+                    mode: "cors",
+                })
+                .then((response) => {
+                    console.log(response);
+                    handleRefresh();
+                })
+                .catch((err) => console.log(err));
+            } else {
+                setToast("No changes made");
+                setunEditable(!uneditable);
+            }
+        }
     };
+    
     useEffect(() => {
         if (identity.name && identity.email) {
             setContent({
                 justify: " justify-space",
                 close: true,
                 sign: false,
+                edit: false,
             });
         } else {
             setunEditable(false);
         }
     }, []);
-    const checkPreview = () => {
+
+    const age_is_valid = () => {
+        const birth_date = new Date(userData.date_of_birth); 
+        const now = new Date();
+        const current_year = now.getFullYear();
+        const year_diff = current_year - birth_date.getFullYear();
+        const birthday_this_year = new Date(current_year, birth_date.getMonth(), birth_date.getDate());
+        const has_had_birthday_this_year = (now >= birthday_this_year);
+        const age = has_had_birthday_this_year
+            ? year_diff
+            : year_diff - 1;
+        return age >= 18 && age <= 120;
+    };
+
+    const checkPreview = () => {    
         if (
             userData.name != "" &&
             userData.email != "" &&
             userData.date_of_birth != "Invalid Date"
         ) {
-            setunEditable(!uneditable);
+            if (!age_is_valid()) {
+                setToast("Age must be between 18 and 120");
+            } else {
+                setunEditable(!uneditable);
+            }
         } else {
             setToast("Please fill Required field");
         }
+    };
+
+    const toggleEdit = () => {
+        setunEditable(!uneditable);
+        setContent({
+            justify: " justify-space",
+            close: !content.close,
+            sign: !content.sign,
+            edit: !content.edit,
+        });
     };
 
     return (
@@ -168,7 +218,7 @@ export default function IdentityPage() {
             </div> */}
                         <div
                             className={
-                                toast != "" && userData?.email === ""
+                                toast != "" && userData?.email === "" 
                                     ? "create-body-form-input-in invalid"
                                     : "create-body-form-input-in"
                             }
@@ -186,7 +236,7 @@ export default function IdentityPage() {
                         </div>
                         <div
                             className={
-                                toast != "" && userData?.date_of_birth === "Invalid Date"
+                                toast != "" && (userData?.date_of_birth === "Invalid Date" || !age_is_valid())
                                     ? "create-body-form-input-in invalid"
                                     : "create-body-form-input-in"
                             }
@@ -196,7 +246,7 @@ export default function IdentityPage() {
                                 id="date_of_birth"
                                 name="date_of_birth"
                                 value={userData.date_of_birth}
-                                disabled={uneditable}
+                                disabled={uneditable || content.edit}
                                 onChange={onChangeHandler}
                                 placeholder=""
                                 type="date"
@@ -210,7 +260,7 @@ export default function IdentityPage() {
                                 id="country_of_birth"
                                 name="country_of_birth"
                                 value={userData.country_of_birth}
-                                disabled={uneditable}
+                                disabled={uneditable || content.edit}
                                 onChange={onChangeHandler}
                                 placeholder="Country Of Birth"
                                 type="text"
@@ -222,7 +272,7 @@ export default function IdentityPage() {
                                 id="city_of_birth"
                                 name="city_of_birth"
                                 value={userData.city_of_birth}
-                                disabled={uneditable}
+                                disabled={uneditable || content.edit}
                                 onChange={onChangeHandler}
                                 placeholder="Country Of Birth"
                                 type="text"
@@ -241,7 +291,7 @@ export default function IdentityPage() {
                             />
                         </div>
                         <div className="create-body-form-input-in">
-                            <label htmlFor="country_of_birth">Company</label>
+                            <label htmlFor="company">Company</label>
                             <input
                                 id="company"
                                 name="company"
@@ -256,13 +306,26 @@ export default function IdentityPage() {
                 </div>
                 {content.sign && (
                     <div className="flex justify-space">
+                        {content.edit && !uneditable && (
+                            <div onClick={toggleEdit} className="create-body-btn">
+                                CANCEL
+                            </div>
+                        )}
                         <div onClick={checkPreview} className="create-body-btn">
                             {uneditable ? "CANCEL" : "PREVIEW"}
                         </div>
-                        {uneditable && (
+                        {uneditable &&  (
                             <input className="create-body-btn" type="submit" value="SIGN"/>
                         )}
                     </div>
+                )}
+                {!content.sign && (
+                    <div className="flex justify-space">
+                        
+                        <div onClick={toggleEdit} className="create-body-btn">
+                            EDIT
+                        </div>
+                    </div>                
                 )}
             </form>
         </div>

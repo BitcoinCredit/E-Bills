@@ -28,14 +28,6 @@ export default function AddContact() {
                     placeholder="Full Name"
                     onChange={handleChange}
                 />
-                <input
-                    type="text"
-                    name="peer_id"
-                    id="peer_id"
-                    value={contact.peer_id}
-                    placeholder="Node Identity"
-                    onChange={handleChange}
-                />
             </div>
             <button onClick={handleSubmit} className="btn">
                 <img src={addIcon}/>

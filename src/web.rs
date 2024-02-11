@@ -23,10 +23,10 @@ use crate::{
     get_whole_identity, issue_new_bill, issue_new_bill_drawer_is_drawee,
     issue_new_bill_drawer_is_payee, read_bill_from_file, read_contacts_map,
     read_identity_from_file, read_peer_id_from_file, request_acceptance, request_pay,
-    AcceptBitcreditBillForm, BitcreditBill, BitcreditBillForList, BitcreditBillForm,
-    BitcreditBillToReturn, Contact, DeleteContactForm, EditContactForm, EndorseBitcreditBillForm,
-    Identity, IdentityForm, IdentityPublicData, IdentityWithAll, NewContactForm, NodeId,
-    RequestToAcceptBitcreditBillForm, RequestToPayBitcreditBillForm,
+    write_identity_to_file, AcceptBitcreditBillForm, BitcreditBill, BitcreditBillForList,
+    BitcreditBillForm, BitcreditBillToReturn, Contact, DeleteContactForm, EditContactForm,
+    EndorseBitcreditBillForm, Identity, IdentityForm, IdentityPublicData, IdentityWithAll,
+    NewContactForm, NodeId, RequestToAcceptBitcreditBillForm, RequestToPayBitcreditBillForm,
 };
 
 use self::handlebars::{Handlebars, JsonRender};
@@ -128,6 +128,32 @@ pub async fn create_identity(identity_form: Form<IdentityForm>, state: &State<Cl
     let mut client = state.inner().clone();
     let identity: IdentityWithAll = get_whole_identity();
     let bills = get_bills();
+    client.put_identity_public_data_in_dht().await;
+
+    Status::Ok
+}
+
+#[post("/change", data = "<identity_form>")]
+pub async fn change_identity(identity_form: Form<IdentityForm>, state: &State<Client>) -> Status {
+    println!("Change identity");
+
+    let mut my_identity: Identity;
+    if !Path::new(IDENTITY_FILE_PATH).exists() {
+        return Status::NotAcceptable;
+    } else {
+        my_identity = read_identity_from_file();
+    }
+
+    let identity_form: IdentityForm = identity_form.into_inner();
+    let mut identity_changes: Identity = Identity::new_empty();
+    identity_changes.name = identity_form.name;
+    identity_changes.company = identity_form.company;
+    identity_changes.email = identity_form.email;
+    identity_changes.postal_address = identity_form.postal_address;
+
+    my_identity.update_from(&identity_changes);
+    write_identity_to_file(&my_identity);
+    let mut client = state.inner().clone();
     client.put_identity_public_data_in_dht().await;
 
     Status::Ok

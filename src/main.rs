@@ -79,6 +79,7 @@ fn rocket_main(dht: dht::network::Client) -> Rocket<Build> {
             routes![
                 web::get_identity,
                 web::create_identity,
+                web::change_identity,
                 web::return_identity,
                 web::return_peer_id
             ],
@@ -590,6 +591,14 @@ pub struct Identity {
     bitcoin_private_key: String,
 }
 
+macro_rules! update_field {
+    ($self:expr, $other:expr, $field:ident) => {
+        if !$other.$field.is_empty() {
+            $self.$field = $other.$field.clone();
+        }
+    };
+}
+
 impl Identity {
     pub fn new_empty() -> Self {
         Self {
@@ -605,6 +614,13 @@ impl Identity {
             private_key_pem: "".to_string(),
             bitcoin_private_key: "".to_string(),
         }
+    }
+
+    pub fn update_from(&mut self, other: &Identity) {
+        update_field!(self, other, name);
+        update_field!(self, other, company);
+        update_field!(self, other, postal_address);
+        update_field!(self, other, email);
     }
 }
 
