@@ -13,7 +13,8 @@
     "react-dom": "^18.2.0",
     "react-scripts": "5.0.1",
     "react-to-pdf": "^0.0.14",
-    "web-vitals": "^2.1.4"
+    "web-vitals": "^2.1.4",
+    "@react-buddy/ide-toolbox": "^2.4.0"
   },
   "scripts": {
     "start": "react-scripts start",

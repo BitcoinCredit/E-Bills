@@ -12,16 +12,18 @@ use rocket::http::{Header, Status};
 use rocket::serde::json::Json;
 use rocket::{Request, Response, State};
 use rocket_dyn_templates::{context, handlebars, Template};
+use tokio::runtime::Handle;
 
 use crate::blockchain::{Chain, ChainToReturn, GossipsubEvent, GossipsubEventId, OperationCode};
 use crate::constants::{BILLS_FOLDER_PATH, BILL_VALIDITY_PERIOD, IDENTITY_FILE_PATH, USEDNET};
 use crate::dht::network::Client;
+use crate::work_with_mint::mint;
 use crate::{
     accept_bill, add_in_contacts_map, api, blockchain, change_contact_data_from_dht,
     change_contact_name_from_contacts_map, create_whole_identity, delete_from_contacts_map,
     endorse_bitcredit_bill, get_bills, get_bills_for_list, get_contact_from_map, get_contacts_vec,
     get_whole_identity, issue_new_bill, issue_new_bill_drawer_is_drawee,
-    issue_new_bill_drawer_is_payee, read_bill_from_file, read_contacts_map,
+    issue_new_bill_drawer_is_payee, mint_bitcredit_bill, read_bill_from_file, read_contacts_map,
     read_identity_from_file, read_peer_id_from_file, request_acceptance, request_pay,
     AcceptBitcreditBillForm, BitcreditBill, BitcreditBillForList, BitcreditBillForm,
     BitcreditBillToReturn, Contact, DeleteContactForm, EditContactForm, EndorseBitcreditBillForm,
@@ -270,6 +272,43 @@ pub async fn return_chain_of_blocks(id: String) -> Json<Chain> {
 #[get("/return")]
 pub async fn return_operation_codes() -> Json<Vec<OperationCode>> {
     Json(OperationCode::get_all_operation_codes())
+}
+
+//PUT
+#[get("/mint/<id>")]
+pub async fn mint_bill(state: &State<Client>, id: String) -> Status {
+    if !Path::new(IDENTITY_FILE_PATH).exists() {
+        Status::NotAcceptable
+    } else {
+        let mut client = state.inner().clone();
+
+        let timestamp = api::TimeApi::get_atomic_time().await.timestamp;
+
+        let correct = mint_bitcredit_bill(&id, timestamp).await;
+
+        if correct {
+            let chain: Chain = Chain::read_chain_from_file(&id);
+            let block = chain.get_latest_block();
+
+            let block_bytes = serde_json::to_vec(block).expect("Error serializing block");
+            let event = GossipsubEvent::new(GossipsubEventId::Block, block_bytes);
+            let message = event.to_byte_array();
+
+            client.add_message_to_topic(message, id.clone()).await;
+
+            //TODO: add for mint or just sent it directly to mint?
+            // client
+            //     .add_bill_to_dht_for_node(
+            //         &endorse_bill_form.bill_name,
+            //         &public_data_endorsee.peer_id.to_string().clone(),
+            //     )
+            //     .await;
+        } else {
+            println!("Can't mint");
+        }
+
+        Status::Ok
+    }
 }
 
 #[get("/return/<id>")]
@@ -636,6 +675,8 @@ pub async fn issue_bill(state: &State<Client>, bill_form: Form<BitcreditBillForm
                     client
                         .add_message_to_topic(message, bill.name.clone())
                         .await;
+                } else {
+                    println!("Can't accept");
                 }
             }
         }
@@ -718,6 +759,7 @@ pub async fn get_identity_public_data(
     identity
 }
 
+//PUT
 #[post("/endorse", data = "<endorse_bill_form>")]
 pub async fn endorse_bill(
     state: &State<Client>,
@@ -758,6 +800,8 @@ pub async fn endorse_bill(
                         &public_data_endorsee.peer_id.to_string().clone(),
                     )
                     .await;
+            } else {
+                println!("Can't endorse");
             }
 
             let bills = get_bills();
@@ -795,6 +839,8 @@ pub async fn request_to_pay_bill(
             client
                 .add_message_to_topic(message, request_to_pay_bill_form.bill_name.clone())
                 .await;
+        } else {
+            println!("Can't request to pay");
         }
         Status::Ok
     }
@@ -825,6 +871,8 @@ pub async fn request_to_accept_bill(
             client
                 .add_message_to_topic(message, request_to_accept_bill_form.bill_name.clone())
                 .await;
+        } else {
+            println!("Can't request to accept");
         }
         Status::Ok
     }
@@ -855,6 +903,8 @@ pub async fn accept_bill_form(
             client
                 .add_message_to_topic(message, accept_bill_form.bill_name.clone())
                 .await;
+        } else {
+            println!("Can't accept");
         }
         Status::Ok
     }

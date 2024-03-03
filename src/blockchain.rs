@@ -339,6 +339,31 @@ impl Chain {
                         return true;
                     }
                 }
+                OperationCode::Mint => {
+                    let block = self.get_block_by_id(block.id.clone());
+
+                    let bill_keys = read_keys_from_bill_file(&block.bill_name);
+                    let key: Rsa<Private> =
+                        Rsa::private_key_from_pem(bill_keys.private_key_pem.as_bytes()).unwrap();
+                    let bytes = hex::decode(block.data.clone()).unwrap();
+                    let decrypted_bytes = decrypt_bytes(&bytes, &key);
+                    let block_data_decrypted = String::from_utf8(decrypted_bytes).unwrap();
+
+                    let part_with_minter = block_data_decrypted
+                        .split("Bill minted by ")
+                        .collect::<Vec<&str>>()
+                        .get(1)
+                        .unwrap()
+                        .to_string();
+
+                    let part_with_minter_u8 = hex::decode(part_with_minter).unwrap();
+                    let minter_bill: IdentityPublicData =
+                        serde_json::from_slice(&part_with_minter_u8).unwrap();
+
+                    if minter_bill.peer_id.eq(&request_node_id) {
+                        return true;
+                    }
+                }
                 OperationCode::RequestToAccept => {
                     let block = self.get_block_by_id(block.id.clone());
 
@@ -424,6 +449,7 @@ pub enum OperationCode {
     Endorse,
     RequestToAccept,
     RequestToPay,
+    Mint,
 }
 
 impl OperationCode {
@@ -444,6 +470,7 @@ impl OperationCode {
             OperationCode::Endorse => "Endorse".to_string(),
             OperationCode::RequestToAccept => "RequestToAccept".to_string(),
             OperationCode::RequestToPay => "RequestToPay".to_string(),
+            OperationCode::Mint => "Mint".to_string(),
         }
     }
 }
@@ -594,6 +621,29 @@ impl Block {
                     nodes.push(endorser_bill_name);
                 }
             }
+            OperationCode::Mint => {
+                let bill_keys = read_keys_from_bill_file(&self.bill_name);
+                let key: Rsa<Private> =
+                    Rsa::private_key_from_pem(bill_keys.private_key_pem.as_bytes()).unwrap();
+                let bytes = hex::decode(self.data.clone()).unwrap();
+                let decrypted_bytes = decrypt_bytes(&bytes, &key);
+                let block_data_decrypted = String::from_utf8(decrypted_bytes).unwrap();
+
+                let part_with_minter = block_data_decrypted
+                    .split("Bill minted by ")
+                    .collect::<Vec<&str>>()
+                    .get(1)
+                    .unwrap()
+                    .to_string();
+
+                let minter_bill_u8 = hex::decode(part_with_minter).unwrap();
+                let minter_bill: IdentityPublicData =
+                    serde_json::from_slice(&minter_bill_u8).unwrap();
+                let minter_peer_id = minter_bill.peer_id.clone();
+                if !minter_peer_id.is_empty() && !nodes.contains(&minter_peer_id) {
+                    nodes.push(minter_peer_id);
+                }
+            }
             OperationCode::RequestToAccept => {
                 let bill_keys = read_keys_from_bill_file(&self.bill_name);
                 let key: Rsa<Private> =
@@ -734,6 +784,29 @@ impl Block {
                 let endorser_bill: IdentityPublicData =
                     serde_json::from_slice(&endorser_bill_u8).unwrap();
                 line = endorser_bill.name + ", " + &endorser_bill.postal_address;
+            }
+            OperationCode::Mint => {
+                let time_of_mint = Utc.timestamp_opt(self.timestamp.clone(), 0).unwrap();
+
+                let bill_keys = read_keys_from_bill_file(&self.bill_name);
+                let key: Rsa<Private> =
+                    Rsa::private_key_from_pem(bill_keys.private_key_pem.as_bytes()).unwrap();
+                let bytes = hex::decode(self.data.clone()).unwrap();
+                let decrypted_bytes = decrypt_bytes(&bytes, &key);
+                let block_data_decrypted = String::from_utf8(decrypted_bytes).unwrap();
+
+                let mut part_with_minter = block_data_decrypted
+                    .split("Bill minted by ")
+                    .collect::<Vec<&str>>()
+                    .get(1)
+                    .unwrap()
+                    .to_string();
+
+                let minter_bill_u8 = hex::decode(part_with_minter).unwrap();
+                let minter_bill: IdentityPublicData =
+                    serde_json::from_slice(&minter_bill_u8).unwrap();
+
+                line = "Bill minted by ".to_string() + &minter_bill.name;
             }
             OperationCode::RequestToAccept => {
                 let time_of_request_to_accept =
