@@ -675,8 +675,8 @@ pub mod network {
 
                         let bill_contain_node = chain.bill_contain_node(request_node_id.clone());
 
-                        if bill_contain_node {
-                            if request.starts_with("KEY_") {
+                        if request.starts_with("KEY_") {
+                            if bill_contain_node {
                                 let public_key = self
                                     .get_identity_public_data_from_dht(request_node_id.clone())
                                     .await
@@ -687,22 +687,20 @@ pub mod network {
                                 let path_to_key =
                                     BILLS_KEYS_FOLDER_PATH.to_string() + "/" + &key_name + ".json";
                                 let file = std::fs::read(&path_to_key).unwrap();
-                                //TODO: encrypt key file
 
                                 let file_encrypted =
                                     encrypt_bytes_with_public_key(&file, public_key);
 
                                 self.respond_file(file_encrypted, channel).await;
-                            } else if request.starts_with("BILL_") {
-                                let bill_name = request.splitn(2, "BILL_").collect::<Vec<&str>>()
-                                    [1]
-                                .to_string();
-                                let path_to_bill =
-                                    BILLS_FOLDER_PATH.to_string() + "/" + &bill_name + ".json";
-                                let file = std::fs::read(&path_to_bill).unwrap();
-
-                                self.respond_file(file, channel).await;
                             }
+                        } else if request.starts_with("BILL_") {
+                            let bill_name =
+                                request.splitn(2, "BILL_").collect::<Vec<&str>>()[1].to_string();
+                            let path_to_bill =
+                                BILLS_FOLDER_PATH.to_string() + "/" + &bill_name + ".json";
+                            let file = std::fs::read(&path_to_bill).unwrap();
+
+                            self.respond_file(file, channel).await;
                         }
                     }
                 }

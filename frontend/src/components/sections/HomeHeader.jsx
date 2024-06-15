@@ -21,6 +21,7 @@ export default function HomeHeader() {
       <div className="home-header-left">
         <IconHolder handleClick={() => handlePage("setting")} icon={setting} />
         <IconHolder handleClick={() => handlePage("contact")} icon={contact} />
+        <IconHolder handleClick={() => handlePage("findbill")} icon={contact} />
         {/* <SecondaryIcon
           routing={() => handlePage("contact")}
           iconImage={contact}

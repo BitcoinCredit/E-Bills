@@ -8,6 +8,7 @@ import IdentityPage from "./components/pages/IdentityPage";
 import SettingPage from "./components/pages/SettingPage";
 import ErrrorPage from "./components/pages/ErrrorPage";
 import Contact from "./components/pages/Contact";
+import FindBill from "./components/pages/FindBill";
 
 export default function App() {
   const { toast, loading, current, popUp, popUp2 } = useContext(MainContext);
@@ -37,6 +38,8 @@ export default function App() {
         return <ActivityPage />;
       case "contact":
         return <Contact />;
+      case "findbill":
+            return <FindBill />;
       case "issue":
         return <IssuePage />;
       case "setting":

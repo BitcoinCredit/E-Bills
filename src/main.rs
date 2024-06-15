@@ -2,9 +2,10 @@ extern crate core;
 #[macro_use]
 extern crate rocket;
 
+use std::cmp::min;
 use std::collections::HashMap;
 use std::fs::DirEntry;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::{env, fs, mem, path, thread};
 
 use bitcoin::PublicKey;
@@ -12,6 +13,9 @@ use borsh::{self, BorshDeserialize, BorshSerialize};
 use chrono::Utc;
 use libp2p::identity::Keypair;
 use libp2p::PeerId;
+use moksha_wallet::http::CrossPlatformHttpClient;
+use moksha_wallet::localstore::sqlite::SqliteLocalStore;
+use moksha_wallet::wallet::Wallet;
 use openssl::pkey::{Private, Public};
 use openssl::rsa;
 use openssl::rsa::{Padding, Rsa};
@@ -21,6 +25,7 @@ use rocket::serde::{Deserialize, Serialize};
 use rocket::yansi::Paint;
 use rocket::{Build, Rocket};
 use rocket_dyn_templates::Template;
+use url::Url;
 
 use crate::blockchain::{
     start_blockchain_for_new_bill, Block, Chain, ChainToReturn, OperationCode,
@@ -33,6 +38,7 @@ use crate::constants::{
 };
 use crate::dht::network::Client;
 use crate::numbers_to_words::encode;
+use crate::work_with_mint::mint;
 
 mod api;
 mod blockchain;
@@ -41,6 +47,7 @@ mod dht;
 mod numbers_to_words;
 mod test;
 mod web;
+mod work_with_mint;
 
 // MAIN
 // #[rocket::main]
@@ -51,6 +58,8 @@ async fn main() {
     env_logger::init();
 
     init_folders();
+
+    init_wallet().await;
 
     let mut dht = dht::dht_main().await.expect("DHT failed to start");
 
@@ -123,6 +132,11 @@ fn rocket_main(dht: Client) -> Rocket<Build> {
                 web::return_chain_of_blocks,
                 web::return_basic_bill,
                 web::sell_bill,
+                web::mint_bill,
+                web::try_mint_bill,
+                web::accept_mint_bill,
+                web::find_bill_in_dht,
+                web::request_to_mint_bill,
             ],
         )
         .mount("/bills", routes![web::return_bills_list,])
@@ -161,6 +175,30 @@ fn init_folders() {
     if !Path::new(BOOTSTRAP_FOLDER_PATH).exists() {
         fs::create_dir(BOOTSTRAP_FOLDER_PATH).expect("Can't create folder bootstrap.");
     }
+}
+
+async fn init_wallet() {
+    let dir = PathBuf::from("./data/wallet".to_string());
+    if !dir.exists() {
+        fs::create_dir_all(dir.clone()).unwrap();
+    }
+    let db_path = dir.join("wallet.db").to_str().unwrap().to_string();
+
+    let localstore = SqliteLocalStore::with_path(db_path.clone())
+        .await
+        .expect("Cannot parse local store");
+
+    //TODO: take from params
+    let mint_url = Url::parse("http://127.0.0.1:3338").expect("Invalid url");
+
+    let identity: Identity = read_identity_from_file();
+    let bitcoin_key = identity.bitcoin_public_key.clone();
+
+    let wallet: Wallet<_, CrossPlatformHttpClient> = Wallet::builder()
+        .with_localstore(localstore)
+        .build()
+        .await
+        .expect("Could not create wallet");
 }
 
 //-------------------------Contacts map-------------------------
@@ -618,21 +656,18 @@ impl Identity {
     }
 
     fn all_changeable_fields_empty(&self) -> bool {
-        self.name == "" &&
-        self.company == "" &&
-        self.postal_address == "" &&
-        self.email == ""
+        self.name == "" && self.company == "" && self.postal_address == "" && self.email == ""
     }
 
     fn all_changeable_fields_equal_to(&self, other: &Self) -> bool {
-        self.name == other.name && 
-        self.company == other.company &&
-        self.postal_address == other.postal_address &&
-        self.email == other.email
+        self.name == other.name
+            && self.company == other.company
+            && self.postal_address == other.postal_address
+            && self.email == other.email
     }
-   
+
     fn update_valid(&self, other: &Self) -> bool {
-        if other.all_changeable_fields_empty() { 
+        if other.all_changeable_fields_empty() {
             return false;
         }
         if self.all_changeable_fields_equal_to(other) {
@@ -1317,12 +1352,16 @@ pub fn endorse_bitcredit_bill(
     let exist_block_with_code_endorse =
         blockchain_from_file.exist_block_with_operation_code(OperationCode::Endorse);
 
+    let exist_block_with_code_mint =
+        blockchain_from_file.exist_block_with_operation_code(OperationCode::Mint);
+
     let exist_block_with_code_sell =
         blockchain_from_file.exist_block_with_operation_code(OperationCode::Sell);
 
     if (my_peer_id.eq(&bill.payee.peer_id)
         && !exist_block_with_code_endorse
-        && !exist_block_with_code_sell)
+        && !exist_block_with_code_sell
+        && !exist_block_with_code_mint)
         || (my_peer_id.eq(&bill.endorsee.peer_id))
     {
         let identity = get_whole_identity();
@@ -1359,6 +1398,86 @@ pub fn endorse_bitcredit_bill(
         let try_add_block = blockchain_from_file.try_add_block(new_block.clone());
         if try_add_block && blockchain_from_file.is_chain_valid() {
             blockchain_from_file.write_chain_to_file(&bill.name);
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    }
+}
+
+pub async fn mint_bitcredit_bill(
+    bill_name: &String,
+    mintnode: IdentityPublicData,
+    timestamp: i64,
+) -> bool {
+    let my_peer_id = read_peer_id_from_file().to_string();
+    let mut bill = read_bill_from_file(&bill_name);
+
+    let mut blockchain_from_file = Chain::read_chain_from_file(bill_name);
+    let last_block = blockchain_from_file.get_latest_block();
+
+    let exist_block_with_code_endorse =
+        blockchain_from_file.exist_block_with_operation_code(OperationCode::Endorse);
+
+    let exist_block_with_code_mint =
+        blockchain_from_file.exist_block_with_operation_code(OperationCode::Mint);
+
+    let exist_block_with_code_sell =
+        blockchain_from_file.exist_block_with_operation_code(OperationCode::Sell);
+
+    if (my_peer_id.eq(&bill.payee.peer_id)
+        && !exist_block_with_code_endorse
+        && !exist_block_with_code_sell
+        && !exist_block_with_code_mint)
+        || (my_peer_id.eq(&bill.endorsee.peer_id))
+    {
+        let identity = get_whole_identity();
+
+        let my_identity_public =
+            IdentityPublicData::new(identity.identity.clone(), identity.peer_id.to_string());
+        let minted_by = serde_json::to_vec(&my_identity_public).unwrap();
+
+        let data_for_new_block_in_bytes = serde_json::to_vec(&mintnode).unwrap();
+        let data_for_new_block = "Endorsed to ".to_string()
+            + &hex::encode(data_for_new_block_in_bytes)
+            + " endorsed by "
+            + &hex::encode(minted_by);
+
+        let keys = read_keys_from_bill_file(&bill_name);
+        let key: Rsa<Private> = Rsa::private_key_from_pem(keys.private_key_pem.as_bytes()).unwrap();
+
+        let data_for_new_block_in_bytes = data_for_new_block.as_bytes().to_vec();
+        let data_for_new_block_encrypted = encrypt_bytes(&data_for_new_block_in_bytes, &key);
+        let data_for_new_block_encrypted_in_string_format =
+            hex::encode(data_for_new_block_encrypted);
+
+        let new_block = Block::new(
+            last_block.id + 1,
+            last_block.hash.clone(),
+            data_for_new_block_encrypted_in_string_format,
+            bill_name.clone(),
+            identity.identity.public_key_pem.clone(),
+            OperationCode::Mint,
+            identity.identity.private_key_pem.clone(),
+            timestamp.clone(),
+        );
+
+        let try_add_block = blockchain_from_file.try_add_block(new_block.clone());
+
+        if try_add_block && blockchain_from_file.is_chain_valid() {
+            let bill_id = bill.name.clone();
+
+            tokio::task::spawn_blocking(move || {
+                let amount = bill.amount_numbers.clone();
+                let bill_id = bill.name.clone();
+                let _ = mint(amount, bill_id);
+            })
+            .await
+            .expect("Mint process panicked");
+
+            blockchain_from_file.write_chain_to_file(&bill_id);
             true
         } else {
             false
@@ -1446,12 +1565,16 @@ pub fn request_pay(bill_name: &String, timestamp: i64) -> bool {
     let exist_block_with_code_endorse =
         blockchain_from_file.exist_block_with_operation_code(OperationCode::Endorse);
 
+    let exist_block_with_code_mint =
+        blockchain_from_file.exist_block_with_operation_code(OperationCode::Mint);
+
     let exist_block_with_code_sell =
         blockchain_from_file.exist_block_with_operation_code(OperationCode::Sell);
 
     if (my_peer_id.eq(&bill.payee.peer_id)
         && !exist_block_with_code_endorse
-        && !exist_block_with_code_sell)
+        && !exist_block_with_code_sell
+        && !exist_block_with_code_mint)
         || (my_peer_id.eq(&bill.endorsee.peer_id))
     {
         let identity = get_whole_identity();
@@ -1507,9 +1630,13 @@ pub fn request_acceptance(bill_name: &String, timestamp: i64) -> bool {
     let exist_block_with_code_sell =
         blockchain_from_file.exist_block_with_operation_code(OperationCode::Sell);
 
+    let exist_block_with_code_mint =
+        blockchain_from_file.exist_block_with_operation_code(OperationCode::Mint);
+
     if (my_peer_id.eq(&bill.payee.peer_id)
         && !exist_block_with_code_endorse
-        && !exist_block_with_code_sell)
+        && !exist_block_with_code_sell
+        && !exist_block_with_code_mint)
         || (my_peer_id.eq(&bill.endorsee.peer_id))
     {
         let identity = get_whole_identity();
@@ -1707,6 +1834,27 @@ pub struct BitcreditBillForm {
 #[serde(crate = "rocket::serde")]
 pub struct EndorseBitcreditBillForm {
     pub endorsee: String,
+    pub bill_name: String,
+}
+
+#[derive(FromForm, Debug, Serialize, Deserialize)]
+#[serde(crate = "rocket::serde")]
+pub struct MintBitcreditBillForm {
+    pub mint_node: String,
+    pub bill_name: String,
+}
+
+#[derive(FromForm, Debug, Serialize, Deserialize)]
+#[serde(crate = "rocket::serde")]
+pub struct AcceptMintBitcreditBillForm {
+    pub interest: u64,
+    pub bill_name: String,
+}
+
+#[derive(FromForm, Debug, Serialize, Deserialize)]
+#[serde(crate = "rocket::serde")]
+pub struct RequestToMintBitcreditBillForm {
+    pub mint_node: String,
     pub bill_name: String,
 }
 

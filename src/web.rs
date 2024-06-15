@@ -1,34 +1,45 @@
 #![feature(proc_macro_hygiene, decl_macro)]
 
 use std::convert::identity;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::{fs, thread};
 
 use bitcoin::secp256k1::Scalar;
 use chrono::{Days, Utc};
-use libp2p::PeerId;
+use futures::executor::block_on;
+use libp2p::dns::DnsConfig;
+use libp2p::{tcp, PeerId};
+use moksha_core::primitives::PostMintQuoteBitcreditResponse;
+use moksha_wallet::http::CrossPlatformHttpClient;
+use moksha_wallet::localstore::sqlite::SqliteLocalStore;
+use moksha_wallet::wallet::Wallet;
 use rocket::fairing::{Fairing, Info, Kind};
 use rocket::form::Form;
 use rocket::http::{Header, Status};
 use rocket::serde::json::Json;
 use rocket::{Request, Response, State};
 use rocket_dyn_templates::{context, handlebars, Template};
+use url::Url;
 
 use crate::blockchain::{Chain, ChainToReturn, GossipsubEvent, GossipsubEventId, OperationCode};
 use crate::constants::{BILLS_FOLDER_PATH, BILL_VALIDITY_PERIOD, IDENTITY_FILE_PATH, USEDNET};
 use crate::dht::network::Client;
+use crate::work_with_mint::{mint, mint_bitcredit, request_to_mint_bitcredit};
 use crate::{
     accept_bill, add_in_contacts_map, api, blockchain, change_contact_data_from_dht,
     change_contact_name_from_contacts_map, create_whole_identity, delete_from_contacts_map,
     endorse_bitcredit_bill, get_bills, get_bills_for_list, get_contact_from_map, get_contacts_vec,
     get_whole_identity, issue_new_bill, issue_new_bill_drawer_is_drawee,
-    issue_new_bill_drawer_is_payee, read_bill_from_file, read_contacts_map,
-    read_identity_from_file, read_peer_id_from_file, request_acceptance, request_pay,
-    sell_bitcredit_bill, write_identity_to_file, AcceptBitcreditBillForm, BitcreditBill, BitcreditBillForList,
-    BitcreditBillForm, BitcreditBillToReturn, Contact, DeleteContactForm, EditContactForm,
-    EndorseBitcreditBillForm, Identity, IdentityForm, IdentityPublicData, IdentityWithAll,
-    NewContactForm, NodeId, RequestToAcceptBitcreditBillForm, RequestToPayBitcreditBillForm,
-    SellBitcreditBillForm,
+    issue_new_bill_drawer_is_payee, mint_bitcredit_bill, read_bill_from_file,
+    read_bill_with_chain_from_file, read_contacts_map, read_identity_from_file,
+    read_peer_id_from_file, request_acceptance, request_pay, sell_bitcredit_bill,
+    write_identity_to_file, AcceptBitcreditBillForm, AcceptMintBitcreditBillForm, BitcreditBill,
+    BitcreditBillForList, BitcreditBillForm, BitcreditBillToReturn, Contact, DeleteContactForm,
+    EditContactForm, EndorseBitcreditBillForm, Identity, IdentityForm, IdentityPublicData,
+    IdentityWithAll, MintBitcreditBillForm, NewContactForm, NodeId,
+    RequestToAcceptBitcreditBillForm, RequestToMintBitcreditBillForm,
+    RequestToPayBitcreditBillForm, SellBitcreditBillForm,
 };
 
 use self::handlebars::{Handlebars, JsonRender};
@@ -151,7 +162,6 @@ pub async fn change_identity(identity_form: Form<IdentityForm>, state: &State<Cl
         return Status::NotAcceptable;
     }
     my_identity = read_identity_from_file();
-
 
     if !my_identity.update_valid(&identity_changes) {
         return Status::NotAcceptable;
@@ -302,6 +312,144 @@ pub async fn return_chain_of_blocks(id: String) -> Json<Chain> {
 #[get("/return")]
 pub async fn return_operation_codes() -> Json<Vec<OperationCode>> {
     Json(OperationCode::get_all_operation_codes())
+}
+
+//PUT
+#[post("/try_mint", data = "<mint_bill_form>")]
+pub async fn try_mint_bill(
+    state: &State<Client>,
+    mint_bill_form: Form<MintBitcreditBillForm>,
+) -> Status {
+    if !Path::new(IDENTITY_FILE_PATH).exists() {
+        Status::NotAcceptable
+    } else {
+        let mut client = state.inner().clone();
+
+        let public_mint_node =
+            get_identity_public_data(mint_bill_form.mint_node.clone(), client.clone()).await;
+
+        if !public_mint_node.name.is_empty() {
+            client
+                .add_bill_to_dht_for_node(
+                    &mint_bill_form.bill_name,
+                    &public_mint_node.peer_id.to_string().clone(),
+                )
+                .await;
+
+            Status::Ok
+        } else {
+            Status::NotAcceptable
+        }
+    }
+}
+
+#[get("/find/<bill_id>")]
+pub async fn find_bill_in_dht(state: &State<Client>, bill_id: String) {
+    let mut client = state.inner().clone();
+    let bill_bytes = client.get_bill(bill_id.to_string().clone()).await;
+    if !bill_bytes.is_empty() {
+        let path = BILLS_FOLDER_PATH.to_string() + "/" + &bill_id + ".json";
+        fs::write(path, bill_bytes.clone()).expect("Can't write file.");
+    }
+}
+
+//PUT
+//TODO: add try_mint_bill here?
+#[post("/request_to_mint", data = "<request_to_mint_bill_form>")]
+pub async fn request_to_mint_bill(
+    state: &State<Client>,
+    request_to_mint_bill_form: Form<RequestToMintBitcreditBillForm>,
+) -> Status {
+    thread::spawn(move || request_to_mint_bitcredit(request_to_mint_bill_form.bill_name.clone()))
+        .join()
+        .expect("Thread panicked");
+    Status::Ok
+}
+
+//PUT
+//This is function for mint software
+#[post("/accept_mint", data = "<accept_mint_bill_form>")]
+pub async fn accept_mint_bill(
+    state: &State<Client>,
+    accept_mint_bill_form: Form<AcceptMintBitcreditBillForm>,
+) -> Json<String> {
+    //call endpoint to create quote
+    // let dir = PathBuf::from("./data/wallet".to_string());
+    // let db_path = dir.join("wallet.db").to_str().unwrap().to_string();
+    // let localstore = SqliteLocalStore::with_path(db_path.clone())
+    //     .await
+    //     .expect("Cannot parse local store");
+
+    // let mint_url = Url::parse("http://127.0.0.1:3338").expect("Invalid url");
+
+    // let wallet: Wallet<_, CrossPlatformHttpClient> = block_on(
+    //     Wallet::builder().with_localstore(localstore).build()
+    // ).unwrap();
+
+    let bill_amount = read_bill_from_file(&accept_mint_bill_form.bill_name.clone()).amount_numbers;
+
+    //TODO: calculate percent
+    let quote =
+        thread::spawn(move || mint_bitcredit(bill_amount, accept_mint_bill_form.bill_name.clone()))
+            .join()
+            .expect("Thread panicked");
+
+    println!("{}", quote.quote);
+    Json(quote.quote)
+    //TODO: catch this object in frontend
+}
+
+//PUT
+#[post("/mint", data = "<mint_bill_form>")]
+pub async fn mint_bill(
+    state: &State<Client>,
+    mint_bill_form: Form<MintBitcreditBillForm>,
+) -> Status {
+    if !Path::new(IDENTITY_FILE_PATH).exists() {
+        Status::NotAcceptable
+    } else {
+        let mut client = state.inner().clone();
+
+        let timestamp = api::TimeApi::get_atomic_time().await.timestamp;
+
+        let public_mint_node =
+            get_identity_public_data(mint_bill_form.mint_node.clone(), client.clone()).await;
+
+        if !public_mint_node.name.is_empty() {
+            let correct = mint_bitcredit_bill(
+                &mint_bill_form.bill_name,
+                public_mint_node.clone(),
+                timestamp,
+            )
+            .await;
+
+            if correct {
+                let chain: Chain = Chain::read_chain_from_file(&mint_bill_form.bill_name);
+                let block = chain.get_latest_block();
+
+                let block_bytes = serde_json::to_vec(block).expect("Error serializing block");
+                let event = GossipsubEvent::new(GossipsubEventId::Block, block_bytes);
+                let message = event.to_byte_array();
+
+                client
+                    .add_message_to_topic(message, mint_bill_form.bill_name.clone())
+                    .await;
+
+                client
+                    .add_bill_to_dht_for_node(
+                        &mint_bill_form.bill_name,
+                        &public_mint_node.peer_id.to_string().clone(),
+                    )
+                    .await;
+            } else {
+                println!("Can't mint");
+            }
+
+            Status::Ok
+        } else {
+            Status::NotAcceptable
+        }
+    }
 }
 
 #[get("/return/<id>")]
